@@ -1,183 +1,678 @@
 # GeneWeaver
 
-GeneWeaver is a GPU-accelerated genomic sequence alignment project. It processes genomic data into manageable chunks and uses a CUDA-based implementation of the Needleman–Wunsch algorithm to perform sequence alignment.
+## GPU-Accelerated CRISPR Alignment Engine
 
-The project includes a Textual terminal user interface that displays genome chunking progress, alignment progress, GPU status, and CPU vs GPU benchmark results.
+GeneWeaver is a genomic sequence processing and alignment project
+designed to work with large DNA datasets. The project combines genome
+chunking, Needleman--Wunsch global sequence alignment, CUDA/Numba GPU
+acceleration, Dask-based workload coordination, PAM-based scoring,
+off-target analysis, and a Textual terminal user interface (TUI).
+
+> **Note:** The biological scoring in this project is a computational
+> heuristic for project/research use. It is not a clinical or
+> experimentally validated CRISPR off-target scoring system.
+
+------------------------------------------------------------------------
 
 ## Features
 
-* Parse and process genomic data
-* Split genome data into manageable `.npy` chunks
-* Display genome chunking progress
-* Perform GPU-accelerated sequence alignment using CUDA
-* Track alignment progress for each chunk pair
-* Detect CUDA and GPU availability
-* Display GPU memory and utilization information
-* Compare CPU and GPU performance
-* Calculate GPU speedup
-* Display results in a Textual terminal dashboard
+-   Parse genomic FASTA data using **BioPython**
+-   Split large genome sequences into manageable **1,000,000-base-pair
+    chunks**
+-   Store genome chunks as NumPy `.npy` arrays
+-   Generate chunk metadata
+-   Perform **Needleman--Wunsch global sequence alignment**
+-   Provide CPU alignment as a baseline
+-   Accelerate alignment with **CUDA/Numba**
+-   Use tiled/shared-memory and boundary-based GPU approaches
+-   Reduce GPU memory usage for large 1M-base inputs from full-matrix
+    storage to boundary storage
+-   Coordinate workloads with **Dask**
+-   Support workload distribution across available GPUs
+-   Detect potential off-target sites using a guide sequence and PAM
+    patterns
+-   Calculate PAM-based scores and severity scores
+-   Rank potential off-target sites
+-   Highlight DNA mismatches in red in the Textual interface
+-   Display GPU, Dask, alignment, chunking, and off-target status in the
+    TUI
+-   Include tests for chunk data and severity scoring
 
-## Project Structure
+------------------------------------------------------------------------
 
-```text
+## Project Workflow
+
+``` text
+Human Genome FASTA
+        |
+        v
+Genome Parsing (BioPython)
+        |
+        v
+1,000,000-bp Genome Chunks
+        |
+        v
+NumPy .npy Storage
+        |
+        +----------------------+
+        |                      |
+        v                      v
+Sequence Alignment       Off-Target Scanning
+        |                      |
+        v                      v
+CUDA / Numba GPU         PAM + Mismatch Analysis
+        |                      |
+        +----------+-----------+
+                   |
+                   v
+              Severity Scoring
+                   |
+                   v
+              Ranking Results
+                   |
+                   v
+             Textual TUI
+```
+
+------------------------------------------------------------------------
+
+## Repository Structure
+
+``` text
 GeneWeaver/
+│
 ├── data/
-│   ├── chunks/
-│   └── GCF_00001405.40_GRCh38.p14_genomic...
+│   └── chunks/
+│       ├── chunk_000001.npy
+│       ├── chunk_000002.npy
+│       ├── ...
+│       ├── chunk_000030.npy
+│       └── metadata.json
 │
 ├── src/
-│   ├── __pycache__/
-│   ├── chunk_metadata.py
-│   ├── firstAlgorithm.py
 │   ├── genome_parser.py
+│   ├── chunk_metadata.py
+│   ├── check_genome_length.py
+│   ├── firstAlgorithm.py
 │   ├── GPUalgorithm.py
-│   ├── test_chunks.py
+│   ├── offtarget.py
+│   ├── scoring.py
+│   ├── severity_scoring.py
 │   ├── tui.py
-│   └── tui.tcss
+│   ├── tui.tcss
+│   ├── test_chunks.py
+│   └── test_severity_scoring.py
 │
 ├── .gitignore
+├── GeneWeaver_1M_scaling_changes.docx
 └── README.md
 ```
 
-## Technologies Used
+------------------------------------------------------------------------
 
-* Python
-* NumPy
-* Numba CUDA
-* Textual
-* NVIDIA CUDA GPU
-* Needleman–Wunsch sequence alignment algorithm
+## Main Modules
 
-## GPU Alignment
+### `src/genome_parser.py`
 
-The GPU implementation uses a diagonal parallelization approach for the Needleman–Wunsch dynamic programming algorithm.
+Reads the genomic FASTA file using BioPython and creates NumPy chunk
+files.
 
-The main steps are:
+Current configuration:
 
-1. Load genomic chunks
-2. Convert DNA bases into integer codes
-3. Transfer sequences and the dynamic programming matrix to the GPU
-4. Process the alignment matrix diagonal by diagonal
-5. Align consecutive chunk pairs
-6. Track alignment progress
-7. Display timing and performance results
+-   Chunk size: **1,000,000 bases**
+-   Maximum chunks generated by the script: **30**
+-   Output directory: `data/chunks/`
+-   Chunk format: NumPy `.npy`
+-   DNA bases are stored as one-byte strings (`S1`)
 
-The project currently aligns 10 chunks, producing 9 consecutive chunk pairs:
+Before running it, place the genome FASTA file at:
 
-```text
-0-1
-1-2
-2-3
-3-4
-4-5
-5-6
-6-7
-7-8
-8-9
+``` text
+data/GCF_000001405.40_GRCh38.p14_genomic.fna
 ```
+
+The FASTA files are intentionally ignored by Git through `.gitignore`.
+
+------------------------------------------------------------------------
+
+### `src/chunk_metadata.py`
+
+Scans the chunk directory and creates:
+
+``` text
+data/chunks/metadata.json
+```
+
+The metadata records:
+
+-   Total number of chunks
+-   Chunk number
+-   File name
+-   Chunk length
+-   NumPy data type
+
+Run:
+
+``` bash
+python src/chunk_metadata.py
+```
+
+------------------------------------------------------------------------
+
+### `src/firstAlgorithm.py`
+
+Contains the CPU baseline implementation of Needleman--Wunsch global
+alignment.
+
+It is useful for:
+
+-   Reference alignment
+-   CPU performance measurements
+-   Comparing CPU and GPU implementations
+
+The implementation uses:
+
+``` text
+Match     = +1
+Mismatch  = -1
+Gap       = -2
+```
+
+------------------------------------------------------------------------
+
+### `src/GPUalgorithm.py`
+
+Contains the CUDA/Numba implementation of Needleman--Wunsch alignment.
+
+The module includes several approaches:
+
+-   `diagonal` -- original/reference full DP matrix approach
+-   `tiled` -- tiled shared-memory full-matrix approach
+-   `banded` -- boundary-based memory-efficient approach
+-   `warp` -- optimized GPU path used as the default mode
+
+The large-input approach avoids storing the complete `n × m`
+dynamic-programming matrix on the GPU.
+
+For a 1,000,000 × 1,000,000 comparison, a full `int32` DP matrix would
+require approximately **4,000 GB** of device memory.
+
+The boundary-based approach stores only the required boundary
+information, reducing memory complexity from:
+
+``` text
+O(n × m)
+```
+
+to:
+
+``` text
+O(n + m)
+```
+
+The project scaling measurements document approximately:
+
+``` text
+4,000 GB  ->  10.38 MB
+```
+
+for the corresponding device-memory requirement.
+
+------------------------------------------------------------------------
+
+### `src/offtarget.py`
+
+Scans genome chunks for candidate off-target sites using a guide RNA
+sequence.
+
+The current TUI configuration uses:
+
+``` text
+Guide RNA:       GACCCCCTCCACCCCGCCTC
+Maximum mismatches: 4
+Both strands:    enabled
+Top results:     5
+```
+
+The scanner considers canonical and alternative PAM patterns used by the
+current implementation, including:
+
+-   `NGG`
+-   `NAG`
+
+For each candidate it records information such as:
+
+-   Chunk
+-   Strand
+-   Position
+-   Guide sequence
+-   Candidate site
+-   PAM
+-   Mismatch positions
+-   Mismatch count
+-   Alignment score
+
+------------------------------------------------------------------------
+
+### `src/scoring.py`
+
+Implements the PAM-proximity scoring component.
+
+It:
+
+1.  Searches for SpCas9 `NGG` PAM sites.
+2.  Finds the PAM closest to a candidate position.
+3.  Calculates PAM proximity.
+4.  Produces a score from `0` to `100`.
+5.  Produces a normalized score from `0` to `1`.
+6.  Assigns a simple risk category:
+    -   `High`
+    -   `Medium`
+    -   `Low`
+
+This is a **PAM-proximity heuristic**, not a validated biological
+scoring model.
+
+------------------------------------------------------------------------
+
+### `src/severity_scoring.py`
+
+Combines alignment quality, mismatch count, and PAM score into a final
+severity score.
+
+Current weighting:
+
+``` text
+Alignment score : 50%
+Mismatch score  : 20%
+PAM score       : 30%
+```
+
+Severity classification:
+
+``` text
+0.75 - 1.00  -> HIGH
+0.50 - 0.749 -> MEDIUM
+0.00 - 0.499 -> LOW
+```
+
+The module also supports:
+
+-   PAM classes
+-   mismatch penalties
+-   seed-position weighting
+-   severity ranking
+-   adding severity information to candidate results
+
+------------------------------------------------------------------------
+
+### `src/tui.py`
+
+Provides the interactive Textual terminal dashboard.
+
+The interface displays:
+
+-   Alignment progress
+-   Chunk-pair progress
+-   GPU status
+-   GPU count and devices
+-   GPU memory
+-   GPU utilization
+-   CUDA status
+-   Kernel information
+-   Dask cluster status
+-   Worker-to-GPU mapping
+-   Pair distribution
+-   Alignment results
+-   Off-target severity
+-   Genome chunking progress
+-   Current file
+-   Chunk count
+
+The off-target display visually compares guide and candidate DNA
+sequences.
+
+Mismatched bases are highlighted in **red**.
+
+Example:
+
+``` text
+guide  5'-ACGTACGT-3'
+site   5'-ACGGACGT-3'
+             x
+```
+
+------------------------------------------------------------------------
+
+## GPU and Dask Scaling
+
+Dask is used to coordinate independent sequence-pair workloads.
+
+The GPU pipeline:
+
+1.  Detects the available GPU count.
+2.  Creates a Dask local cluster with workers based on the detected GPU
+    count.
+3.  Maps workers to GPU IDs.
+4.  Submits alignment tasks to workers.
+5.  Pins a worker process to its assigned GPU where supported.
+6.  Collects alignment results and progress information.
+
+For example, with two GPUs, sequence-pair jobs can be distributed
+between the two GPU workers.
+
+The project also records the GPU ID and Dask worker associated with an
+alignment result.
+
+### Important
+
+Actual CUDA execution requires a machine with a compatible **NVIDIA GPU
+and CUDA driver**.
+
+If no usable NVIDIA GPU/driver is available, the CUDA alignment code
+cannot execute on the local machine. CPU validation/emulation can still
+be used for algorithm verification, but it is not equivalent to
+measuring real GPU performance.
+
+------------------------------------------------------------------------
+
+## 1M-Base Scaling
+
+The original full-matrix Needleman--Wunsch implementation becomes
+impractical for very large chunks because the dynamic-programming matrix
+grows as `O(n × m)`.
+
+The large-input solution uses:
+
+-   32 × 32 tiles
+-   Anti-diagonal tile processing
+-   CUDA shared memory
+-   Horizontal and vertical boundary buffers
+-   Rotating corner buffers
+-   Vectorized DNA encoding
+-   Direct `.npy` to integer-array loading
+-   Memory-mapped chunk loading where applicable
+-   GPU memory pre-allocation checks
+-   Guarded full-matrix kernels
+
+Reported scaling results from the project work include:
+
+  Metric                                  Earlier approach   Scaled approach
+  ------------------------------------- ------------------ -----------------
+  Device memory for 1M × 1M pair                \~4,000 GB        \~10.38 MB
+  Memory reduction                                     ---        \~385,543×
+  Largest workable chunk on 8 GB card          \~44,000 bp     1,000,000+ bp
+  Chunk parse time                                  124 ms            \~1 ms
+
+The 1M-base alignment is still computationally expensive because the
+number of DP cells is extremely large. The memory bottleneck was
+reduced, but runtime remains an important area for future optimization.
+
+------------------------------------------------------------------------
+
+## Installation
+
+### 1. Clone the repository
+
+``` bash
+git clone <your-repository-url>
+cd GeneWeaver
+```
+
+### 2. Create a virtual environment
+
+Windows:
+
+``` powershell
+python -m venv .venv
+.venv\Scripts\activate
+```
+
+Linux/macOS:
+
+``` bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+### 3. Install Python dependencies
+
+``` bash
+pip install numpy biopython numba dask distributed textual
+```
+
+If you use a CUDA-enabled NVIDIA environment, install a compatible
+Numba/CUDA configuration for that machine as well.
+
+------------------------------------------------------------------------
+
+## Preparing Genome Data
+
+Place the genome FASTA file in:
+
+``` text
+data/GCF_000001405.40_GRCh38.p14_genomic.fna
+```
+
+Then run:
+
+``` bash
+python src/genome_parser.py
+```
+
+This generates chunk files under:
+
+``` text
+data/chunks/
+```
+
+After generating or changing chunks, create metadata:
+
+``` bash
+python src/chunk_metadata.py
+```
+
+------------------------------------------------------------------------
 
 ## Running the Textual Dashboard
 
 From the project root:
 
-```powershell
-python src\tui.py
+``` bash
+python src/tui.py
 ```
 
-The Textual dashboard displays:
+The TUI expects the chunk files configured in `src/tui.py`.
 
-```text
-GENEWEAVER
+The current dashboard configuration processes the first 10 chunk files
+for its alignment pipeline:
 
-ALIGNMENT DASHBOARD
-GPU Alignment Progress
-Chunk Pair: 9 / 9
-Progress: 100%
-
-GPU STATUS
-GPU: Connected
-GPU Memory
-GPU Utilization
-CUDA Status
-
-RESULTS
-CPU Baseline
-GPU Result
-Speedup
-
-Genome Chunking Progress
-Status
-Current File
-Chunks: 10 / 10
+``` text
+chunk_000001.npy
+...
+chunk_000010.npy
 ```
 
-## GPU Requirements
+The repository can contain additional generated chunks.
 
-To run the GPU alignment, the system requires:
+------------------------------------------------------------------------
 
-* An NVIDIA GPU with CUDA support
-* CUDA-compatible drivers
-* Numba
-* NumPy
+## Running Individual Components
 
-Check whether CUDA is available:
+### PAM scoring
 
-```powershell
-nvidia-smi
+``` bash
+python src/scoring.py
 ```
 
-The Python code also checks CUDA using:
+### Severity scoring tests
 
-```python
-cuda.is_available()
+``` bash
+python src/test_severity_scoring.py
 ```
 
-If no CUDA-compatible GPU is available, the application displays:
+### Chunk tests
 
-```text
-GPU: Not Connected
-CUDA Status: Not Available
+``` bash
+python src/test_chunks.py
 ```
 
-The dashboard can still run, but the GPU alignment itself requires CUDA hardware.
+> `test_chunks.py` is currently configured to expect 10 chunks. If the
+> repository contains a different number of chunks, update the test
+> configuration before using it as a complete dataset validation.
 
-## Example Benchmark Result
+### CPU alignment baseline
 
-The project was successfully tested on an:
-
-```text
-NVIDIA GeForce RTX 4060 Laptop GPU
+``` bash
+python src/firstAlgorithm.py
 ```
 
-Example results:
+### GPU alignment / hardware check
 
-```text
-CPU Average Time: 19853.55 ms
-CPU Throughput:   5,038,904 cells/sec
-
-GPU Average Time: 1362.30 ms
-GPU Throughput:   75,334,582 cells/sec
-
-GPU Speedup:      14.6x
+``` bash
+python src/GPUalgorithm.py
 ```
 
-This shows that the GPU implementation significantly improves sequence alignment performance compared with the CPU baseline.
+On a CUDA-enabled machine, this reports detected GPU information and
+runs the configured alignment pipeline.
 
-## Current Status
+------------------------------------------------------------------------
 
-* Genome parsing
-* Genome chunking
-* Chunk metadata generation
-* Textual terminal interface
-* Genome chunking progress bar
-* Alignment progress tracking
-* CUDA GPU detection
-* GPU status display
-* CPU baseline benchmark
-* GPU alignment benchmark
-* CPU vs GPU comparison
-* Speedup calculation
+## Testing and Verification
+
+The project includes tests for:
+
+### Genome chunks
+
+-   Chunk files exist
+-   Chunk shape is correct
+-   Chunk length is correct
+-   DNA bases are valid
+-   Metadata exists
+
+### Severity scoring
+
+-   Score stays within the expected range
+-   HIGH/MEDIUM/LOW classification works
+-   Off-target ranking is ordered correctly
+-   PAM contribution affects the final score
+
+For a complete test run, execute the test files individually:
+
+``` bash
+python src/test_chunks.py
+python src/test_severity_scoring.py
+```
+
+The chunk test is intentionally configured for the original 10-chunk
+test set and should be adjusted if the expected dataset size changes.
+
+------------------------------------------------------------------------
+
+## Configuration
+
+Important settings are located near the top of `src/tui.py`:
+
+``` python
+CHUNK_DIR = "data/chunks"
+
+SAMPLE_SIZE = 500000
+
+KERNEL_MODE = "warp"
+
+GUIDE_RNA = "GACCCCCTCCACCCCGCCTC"
+
+MAX_MISMATCHES = 4
+
+SCAN_BOTH_STRANDS = True
+
+TOP_OFF_TARGETS = 5
+```
+
+These can be changed for different experiments.
+
+------------------------------------------------------------------------
+
+## Data and Git
+
+Large genomic FASTA files are ignored by Git:
+
+``` text
+data/*.fna
+data/*.fasta
+data/*.fa
+```
+
+For a real repository, it is recommended to avoid committing very large
+genome datasets and thousands of generated chunk files to GitHub. Keep
+source code, metadata, small test data, and reproducible data-generation
+instructions in Git, while storing large datasets separately.
+
+------------------------------------------------------------------------
+
+## Technologies Used
+
+  Technology          Purpose
+  ------------------- -------------------------------------
+  Python              Main programming language
+  BioPython           FASTA/genome parsing
+  NumPy               DNA arrays and numerical processing
+  Needleman--Wunsch   Global sequence alignment
+  Numba CUDA          GPU acceleration
+  Dask Distributed    Workload coordination
+  Textual             Terminal user interface
+  JSON                Chunk metadata
+  Git/GitHub          Version control
+
+------------------------------------------------------------------------
+
+## Project Status
+
+### Completed
+
+-   Genome parsing
+-   Genome chunking
+-   NumPy chunk storage
+-   Chunk metadata generation
+-   CPU Needleman--Wunsch baseline
+-   CUDA/Numba alignment implementations
+-   Memory-efficient boundary-based GPU approach
+-   Dask workload coordination
+-   PAM detection and PAM-proximity scoring
+-   Off-target scanning
+-   Severity scoring and ranking
+-   Textual monitoring dashboard
+-   DNA mismatch visualization
+-   Large-input memory safeguards and host-side optimizations
+
+### Future Improvements
+
+-   Further reduce runtime for 1M × 1M alignment
+-   Improve GPU occupancy and throughput
+-   Continue refining the Textual dashboard
+-   Expand off-target candidate detection and biological modeling
+-   Improve validation across different CUDA-enabled GPU hardware
+-   Add more automated integration tests
+-   Improve configuration so chunk counts and dataset sizes are not
+    hard-coded
+
+------------------------------------------------------------------------
+
+## Disclaimer
+
+GeneWeaver is an academic/internship project intended for software and
+algorithm experimentation with genomic data.
+
+The PAM and severity scores implemented here are computational
+heuristics and should **not** be interpreted as clinical
+recommendations, medical advice, or experimentally validated predictions
+of CRISPR activity or off-target risk.
+
+------------------------------------------------------------------------
 
 ## Team
 
-Developed collaboratively as part of the GeneWeaver project.
+**GeneWeaver -- GPU-Accelerated CRISPR Alignment Engine**
+
+Developed as part of the **Infotact Solutions -- Python Development
+Internship**.
