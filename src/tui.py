@@ -19,7 +19,7 @@ import offtarget
 
 
 CHUNK_DIR = "data/chunks"
-CHUNK_FILENAMES = [f"chunk_{i:06d}.npy" for i in range(1, 11)]
+CHUNK_FILENAMES = [f"chunk_{i:06d}.npy" for i in range(1, 31)]
 
 SAMPLE_SIZE = 500000
 
